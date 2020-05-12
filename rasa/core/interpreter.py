@@ -6,6 +6,7 @@ import re
 
 import os
 from typing import Text, List, Dict, Any, Union, Optional, Tuple
+import numpy as np
 
 import rasa.utils.io
 from rasa.constants import DOCS_URL_STORIES
@@ -330,14 +331,22 @@ class RasaE2EInterpreter(NaturalLanguageInterpreter):
 
     def prepare_training_data(self, trackers_as_states, trackers_as_actions, domain):
         training_examples = []
+        all_slots = []
         for tracker in trackers_as_states:
             for state in tracker:
                 if state and not state == {}:
                     training_examples.append(state["prev_action"])
+                    if len(domain.slots) == 1:
+                        all_slots += list(state['slots'].keys())
                     if "user" in state.keys():
                         training_examples.append(state["user"])
         training_examples += [Message(action) for action in domain.action_names]
         training_data = TrainingData(training_examples=training_examples)
+        if len(domain.slots) == 1:
+            # COMMENT: this is trying to collect slots from the data;
+            self.all_slots = list(set(all_slots))
+        else:
+            self.all_slots = domain.slots
 
         training_examples = [action for tr in trackers_as_actions for action in tr]
         training_data.training_examples += training_examples
@@ -374,6 +383,9 @@ class RasaE2EInterpreter(NaturalLanguageInterpreter):
                                 name = state[key].as_dict()["text"]
                                 example = find_same(name, TEXT, training_data)
                                 state[key] = example
+
+        self.slot_states = domain.slot_states
+
         self.trainer.persist(output_path, fixed_model_name="nlu")
 
 
