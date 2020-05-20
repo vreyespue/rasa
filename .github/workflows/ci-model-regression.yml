@@ -1,0 +1,130 @@
+name: CI - Model Regression
+
+on:
+  push:
+    branches:
+    - '[0-9]+.[0-9]+.x'
+    tags:
+    - '**'
+  pull_request:
+    types: [opened, synchronize, labeled]
+
+env:
+  GKE_ZONE: us-central1-a
+
+jobs:
+  cleanup_runs:
+    name: Cancel old branch builds
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.ref, 'refs/tags/') && github.ref != 'refs/heads/master'"
+
+    steps:
+      - name: Find and cancel old builds of this branch
+        uses: rokroskar/workflow-run-cleanup-action@v0.2.2
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+  deploy_runner_gpu:
+    name: Deploy Github Runner - GPU
+    runs-on: ubuntu-latest
+    if: "contains(github.event.pull_request.labels.*.name, 'runner:gpu') && github.event.pull_request.author_association == 'MEMBER'"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Download gomplate
+        run: |-
+          curl -o gomplate -sSL https://github.com/hairyhenderson/gomplate/releases/download/v3.6.0/gomplate_linux-amd64
+          chmod 755 gomplate
+
+      - name: Render deployment template
+        run: |-
+          ./gomplate -f .github/workflows/runner/deployment.yaml.tmpl -o runner_deployment.yaml
+
+      # Setup gcloud CLI
+      - uses: GoogleCloudPlatform/github-actions/setup-gcloud@master
+        with:
+          service_account_key: ${{ secrets.GKE_SA_RASA_CI_GPU }}
+          project_id: ${{ secrets.GKE_SA_RASA_CI_GPU_PROJECT }}
+
+      # Get the GKE credentials so we can deploy to the cluster
+      - run: |-
+          gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --zone "$GKE_ZONE"
+
+      - name: Deploy Github Runner
+        run: |-
+          kubectl apply -f runner_deployment.yaml
+          kubectl -n github-runner rollout status --timeout=10m deployment/github-runner-$GITHUB_RUN_ID
+
+  model_regression_test_gpu:
+    name: Model Regression Tests - GPU
+    needs: deploy_runner_gpu
+    runs-on: [self-hosted, gpu]
+    if: "contains(github.event.pull_request.labels.*.name, 'runner:gpu') && github.event.pull_request.author_association == 'MEMBER'"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          repository: RasaHQ/rasa
+
+      - name: Read Poetry Version 🔢
+        run: |
+          echo "::set-env name=POETRY_VERSION::$(scripts/poetry-version.sh)"
+        shell: bash
+
+      - name: Set up Python 3.7 🐍
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.7
+
+      - name: Install poetry 🦄
+        uses: Gr1N/setup-poetry@v1
+        with:
+          poetry-version: ${{ env.POETRY_VERSION }}
+
+      - name: Load Poetry Cached Libraries ⬇
+        uses: actions/cache@v1
+        with:
+          path: ~/.cache/pypoetry/virtualenvs
+          key: ${{ runner.os }}-poetry-3.7-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: ${{ runner.os }}-poetry-3.7
+
+      - name: Install Dependencies 📦
+        run: |
+          sudo apt-get -y install libpq-dev
+          make install-full
+
+      - name: Validate that GPUs are working
+        run: |-
+          python -c 'from tensorflow.python.client import device_lib; print(device_lib.list_local_devices())' || true
+
+      - name: Run test
+        run: |-
+          poetry run rasa --version
+          make test
+
+  remove_runner_gpu:
+    name: Delete Github Runner - GPU
+    needs:
+    - deploy_runner_gpu
+    - model_regression_test_gpu
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    if: "contains(github.event.pull_request.labels.*.name, 'runner:gpu') && github.event.pull_request.author_association == 'MEMBER' && (failure() || success() || cancelled())"
+
+    steps:
+      # Setup gcloud CLI
+      - uses: GoogleCloudPlatform/github-actions/setup-gcloud@master
+        with:
+          service_account_key: ${{ secrets.GKE_SA_RASA_CI_GPU }}
+          project_id: ${{ secrets.GKE_SA_RASA_CI_GPU_PROJECT }}
+
+      # Get the GKE credentials so we can deploy to the cluster
+      - run: |-
+          gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER }}" --zone "$GKE_ZONE"
+
+      - name: Remove Github Runner
+        run: |-
+          kubectl -n github-runner delete deployments github-runner-${GITHUB_RUN_ID} --grace-period=30
