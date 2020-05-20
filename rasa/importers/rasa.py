@@ -3,6 +3,7 @@ import os
 from typing import Dict, List, Optional, Text, Union
 
 from rasa import data
+from rasa.configurations import autoconfig
 from rasa.core.domain import Domain, InvalidDomain
 from rasa.core.interpreter import NaturalLanguageInterpreter, RegexInterpreter
 from rasa.core.training.dsl import StoryFileReader
@@ -35,6 +36,8 @@ class RasaFileImporter(TrainingDataImporter):
         self._story_files, self._nlu_files = data.get_core_nlu_files(
             training_data_paths
         )
+
+        self.config = autoconfig.get_autoconfiguration(self.config)
 
     async def get_config(self) -> Dict:
         return self.config
